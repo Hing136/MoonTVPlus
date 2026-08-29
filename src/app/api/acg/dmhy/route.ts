@@ -3,8 +3,21 @@ import { NextRequest, NextResponse } from 'next/server';
 import { parseStringPromise } from 'xml2js';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
+import { getConfig } from '@/lib/config';
+import { getMagnetBaseUrl, universalMagnetFetch } from '@/lib/magnet.client';
+import { hasFeaturePermission } from '@/lib/permissions';
 
 export const runtime = 'nodejs';
+
+const pickText = (value: any): string => {
+  if (value === undefined || value === null) return '';
+  const first = Array.isArray(value) ? value[0] : value;
+  if (first === undefined || first === null) return '';
+  if (typeof first === 'object') {
+    return String(first._ ?? first.$?.url ?? first.$?.href ?? '').trim();
+  }
+  return String(first).trim();
+};
 
 /**
  * POST /api/acg/dmhy
@@ -15,7 +28,7 @@ export const runtime = 'nodejs';
 export async function POST(req: NextRequest) {
   try {
     const authInfo = getAuthInfoFromCookie(req);
-    if (!authInfo || (authInfo.role !== 'admin' && authInfo.role !== 'owner')) {
+    if (!authInfo?.username || !(await hasFeaturePermission(authInfo.username, 'magnet_search'))) {
       return NextResponse.json(
         { error: '无权限访问' },
         { status: 403 }
@@ -56,11 +69,15 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const baseUrl = 'http://share.dmhy.org/topics/rss/rss.xml';
+    const config = await getConfig();
+    const baseUrl = `${getMagnetBaseUrl(
+      'http://share.dmhy.org',
+      config.SiteConfig.MagnetDmhyReverseProxy
+    )}/topics/rss/rss.xml`;
     const params = new URLSearchParams({ keyword: trimmedKeyword });
     const searchUrl = `${baseUrl}?${params.toString()}`;
 
-    const response = await fetch(searchUrl, {
+    const response = await universalMagnetFetch(searchUrl, config.SiteConfig.MagnetProxy, {
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -85,13 +102,21 @@ export async function POST(req: NextRequest) {
 
     const items = parsed.rss.channel[0].item;
 
-    const results = items.map((item: any) => {
-      const title = item.title?.[0] || '';
-      const link = item.link?.[0] || '';
-      const guid = item.guid?.[0] || link || `${title}-${item.pubDate?.[0] || ''}`;
-      const pubDate = item.pubDate?.[0] || '';
-      const description = item.description?.[0] || '';
-      const torrentUrl = item.enclosure?.[0]?.$?.url || '';
+    const results = items.map((item: any, index: number) => {
+      const title = pickText(item.title);
+      const link = pickText(item.link);
+      const pubDate = pickText(item.pubDate);
+      const description = pickText(item.description);
+      const torrentUrl =
+        pickText(item.enclosure?.[0]?.$?.url) ||
+        pickText(item.enclosure?.[0]?.$?.href) ||
+        pickText(item.enclosure?.[0]);
+      // guid 在 xml2js 下常为 { _: url, $: { isPermaLink } }，必须抽成纯字符串，否则前端 key 全变成 [object Object]
+      const guid =
+        pickText(item.guid) ||
+        torrentUrl ||
+        link ||
+        `${title}-${pubDate}-${index}`;
 
       // 提取描述中的图片（如果有）
       let images: string[] = [];

@@ -2,14 +2,15 @@
 
 'use client';
 
-import { Heart, Radio, Tv } from 'lucide-react';
+import { GitBranch, Heart, Radio, Tv } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   deleteFavorite,
   generateStorageKey,
   isFavorited as checkIsFavorited,
+  isLivePlayRecordSavingEnabled,
   saveFavorite,
   savePlayRecord,
   subscribeToDataUpdates,
@@ -43,6 +44,21 @@ interface LiveChannel {
   url: string;
 }
 
+type MergedChannelItem =
+  | {
+    type: 'single';
+    key: string;
+    channel: LiveChannel;
+  }
+  | {
+    type: 'merged';
+    key: string;
+    name: string;
+    group: string;
+    logo: string;
+    channels: LiveChannel[];
+  };
+
 // 直播源接口
 interface LiveSource {
   key: string;
@@ -53,17 +69,37 @@ interface LiveSource {
   from: 'config' | 'custom';
   channelNumber?: number;
   disabled?: boolean;
+  proxyMode?: 'full' | 'm3u8-only' | 'direct'; // 代理模式
 }
 
+type LiveLineTestResult = {
+  status: 'testing' | 'ok' | 'fail';
+  type?: 'm3u8' | 'flv' | 'mp4' | 'unknown';
+  firstByteMs?: number;
+  speedKBps?: number;
+  bytesRead?: number;
+  testedAt?: number;
+  error?: string;
+};
+
+
 function LivePageClient() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
   // 动态加载浏览器专用库
   useEffect(() => {
     if (typeof window !== 'undefined') {
       import('artplayer').then(mod => { Artplayer = mod.default; });
       import('hls.js').then(mod => { Hls = mod.default; });
       import('flv.js').then(mod => { flvjs = mod.default; });
+
+      const runtimeConfig = (window as any).RUNTIME_CONFIG;
+      if (runtimeConfig?.LIVE_ENABLED === false) {
+        router.replace('/');
+      }
     }
-  }, []);
+  }, [router]);
 
   // -----------------------------------------------------------------------------
   // 状态变量（State）
@@ -74,9 +110,6 @@ function LivePageClient() {
   >('loading');
   const [loadingMessage, setLoadingMessage] = useState('正在加载直播源...');
   const [error, setError] = useState<string | null>(null);
-
-  const searchParams = useSearchParams();
-  const router = useRouter();
 
   // 直播源相关
   const [liveSources, setLiveSources] = useState<LiveSource[]>([]);
@@ -119,6 +152,8 @@ function LivePageClient() {
 
   // 搜索关键词
   const [searchKeyword, setSearchKeyword] = useState('');
+  const [expandedMergedChannels, setExpandedMergedChannels] = useState<string[]>([]);
+  const [lineTestResults, setLineTestResults] = useState<Record<string, LiveLineTestResult>>({});
 
   // 节目单信息
   const [epgData, setEpgData] = useState<{
@@ -145,7 +180,7 @@ function LivePageClient() {
     currentChannelId: currentChannel?.id || '',
     currentChannelName: currentChannel?.name || '',
     currentChannelUrl: currentChannel?.url || '',
-    onChannelChange: (channelId, channelUrl) => {
+    onChannelChange: (channelId, _channelUrl) => {
       // 房员接收到频道切换指令
       if (!currentChannels || !Array.isArray(currentChannels)) return;
       const channel = currentChannels.find(c => c.id === channelId);
@@ -285,6 +320,19 @@ function LivePageClient() {
   // 播放器引用
   const artPlayerRef = useRef<any>(null);
   const artRef = useRef<HTMLDivElement | null>(null);
+  const syncAnime4KCanvasFlip = (flip?: string) => {
+    const canvas = anime4kRef.current?.canvas as HTMLCanvasElement | undefined;
+    if (!canvas) return;
+
+    const currentFlip = flip || artPlayerRef.current?.flip || 'normal';
+    canvas.style.transformOrigin = 'center center';
+    canvas.style.transform =
+      currentFlip === 'horizontal'
+        ? 'scaleX(-1)'
+        : currentFlip === 'vertical'
+          ? 'scaleY(-1)'
+          : 'none';
+  };
 
   // 分组标签滚动相关
   const groupContainerRef = useRef<HTMLDivElement>(null);
@@ -294,6 +342,12 @@ function LivePageClient() {
   // -----------------------------------------------------------------------------
   // 工具函数（Utils）
   // -----------------------------------------------------------------------------
+
+  // 获取 logo URL（始终使用代理）
+  const getLogoUrl = (logoUrl: string, sourceKey: string) => {
+    if (!logoUrl) return '';
+    return `/api/proxy/logo?url=${encodeURIComponent(logoUrl)}&source=${sourceKey}`;
+  };
 
   // 获取直播源列表
   const fetchLiveSources = async () => {
@@ -429,23 +483,25 @@ function LivePageClient() {
         if (selectedChannel) {
           fetchEpgData(selectedChannel, source);
 
-          // 保存播放记录
-          try {
-            await savePlayRecord(`live_${source.key}`, `live_${selectedChannel.id}`, {
-              title: selectedChannel.name,
-              source_name: source.name,
-              year: '',
-              cover: `/api/proxy/logo?url=${encodeURIComponent(selectedChannel.logo)}&source=${source.key}`,
-              index: 1,
-              total_episodes: 1,
-              play_time: 0,
-              total_time: 0,
-              save_time: Date.now(),
-              search_title: '',
-              origin: 'live',
-            });
-          } catch (err) {
-            console.error('保存播放记录失败:', err);
+          // 保存播放记录（由本地设置控制，默认关闭）
+          if (isLivePlayRecordSavingEnabled()) {
+            try {
+              await savePlayRecord(`live_${source.key}`, `live_${selectedChannel.id}`, {
+                title: selectedChannel.name,
+                source_name: source.name,
+                year: '',
+                cover: getLogoUrl(selectedChannel.logo, source.key),
+                index: 1,
+                total_episodes: 1,
+                play_time: 0,
+                total_time: 0,
+                save_time: Date.now(),
+                search_title: '',
+                origin: 'live',
+              });
+            } catch (err) {
+              console.error('保存播放记录失败:', err);
+            }
           }
 
           // 更新URL参数
@@ -619,14 +675,14 @@ function LivePageClient() {
       await fetchEpgData(channel, currentSource);
     }
 
-    // 保存播放记录
-    if (currentSource) {
+    // 保存播放记录（由本地设置控制，默认关闭）
+    if (currentSource && isLivePlayRecordSavingEnabled()) {
       try {
         await savePlayRecord(`live_${currentSource.key}`, `live_${channel.id}`, {
           title: channel.name,
           source_name: currentSource.name,
           year: '',
-          cover: `/api/proxy/logo?url=${encodeURIComponent(channel.logo)}&source=${currentSource.key}`,
+          cover: getLogoUrl(channel.logo, currentSource.key),
           index: 1,
           total_episodes: 1,
           play_time: 0,
@@ -866,6 +922,7 @@ function LivePageClient() {
         handleCanvasClick,
         handleCanvasDblClick,
       };
+      syncAnime4KCanvasFlip();
 
       console.log('Anime4K超分已启用，模式:', anime4kModeRef.current, '倍数:', scale);
       if (artPlayerRef.current) {
@@ -1120,6 +1177,348 @@ function LivePageClient() {
     return filtered;
   };
 
+  const mergedChannelItems = useMemo<MergedChannelItem[]>(() => {
+    if (!filteredChannels || filteredChannels.length === 0) return [];
+
+    const mergedMap = new Map<string, {
+      key: string;
+      name: string;
+      group: string;
+      logo: string;
+      channels: LiveChannel[];
+    }>();
+    const order: string[] = [];
+
+    filteredChannels.forEach((channel) => {
+      const mergedKey = `${channel.group}::${channel.name.trim().toLowerCase()}`;
+      const existing = mergedMap.get(mergedKey);
+
+      if (existing) {
+        existing.channels.push(channel);
+        if (!existing.logo && channel.logo) {
+          existing.logo = channel.logo;
+        }
+        return;
+      }
+
+      mergedMap.set(mergedKey, {
+        key: mergedKey,
+        name: channel.name,
+        group: channel.group,
+        logo: channel.logo,
+        channels: [channel],
+      });
+      order.push(mergedKey);
+    });
+
+    return order.map((key) => {
+      const item = mergedMap.get(key);
+      if (!item) {
+        return null;
+      }
+      if (item.channels.length === 1) {
+        return {
+          type: 'single',
+          key,
+          channel: item.channels[0],
+        };
+      }
+
+      return {
+        type: 'merged',
+        key,
+        name: item.name,
+        group: item.group,
+        logo: item.logo,
+        channels: item.channels,
+      };
+    }).filter((item): item is MergedChannelItem => item !== null);
+  }, [filteredChannels]);
+
+  const toggleMergedChannel = (key: string) => {
+    setExpandedMergedChannels((prev) => (
+      prev.includes(key)
+        ? prev.filter(item => item !== key)
+        : [...prev, key]
+    ));
+  };
+
+  const getLineTestKey = (channel: LiveChannel) => {
+    return `${currentSourceRef.current?.key || currentSource?.key || ''}:${channel.id}:${channel.url}`;
+  };
+
+  const formatLineSpeed = (speedKBps?: number) => {
+    if (!speedKBps || speedKBps <= 0) return '';
+    if (speedKBps >= 1024) return `${(speedKBps / 1024).toFixed(1)} MB/s`;
+    return `${speedKBps.toFixed(0)} KB/s`;
+  };
+
+  const formatLineLatency = (firstByteMs?: number) => {
+    if (!firstByteMs || firstByteMs <= 0) return '';
+    return `${Math.round(firstByteMs)}ms`;
+  };
+
+  const getLineTestLabel = (channel: LiveChannel) => {
+    const result = lineTestResults[getLineTestKey(channel)];
+    if (!result) return '';
+    if (result.status === 'testing') return '测量中...';
+    if (result.status === 'fail') return '不可用';
+
+    const speed = formatLineSpeed(result.speedKBps);
+    const latency = formatLineLatency(result.firstByteMs);
+    if (speed && latency) return `${speed} · ${latency}`;
+    return speed || latency || '可用';
+  };
+
+  const getBestTestedLine = (channels: LiveChannel[]) => {
+    const okChannels = channels
+      .map((channel) => ({ channel, result: lineTestResults[getLineTestKey(channel)] }))
+      .filter((item): item is { channel: LiveChannel; result: LiveLineTestResult } => item.result?.status === 'ok');
+
+    if (okChannels.length === 0) return null;
+
+    return okChannels.sort((a, b) => {
+      const speedDiff = (b.result.speedKBps || 0) - (a.result.speedKBps || 0);
+      if (Math.abs(speedDiff) > 1) return speedDiff;
+      return (a.result.firstByteMs || Number.MAX_SAFE_INTEGER) - (b.result.firstByteMs || Number.MAX_SAFE_INTEGER);
+    })[0].channel;
+  };
+
+  const getPreferredLine = (channels: LiveChannel[]) => {
+    if (!channels || channels.length === 0) return null;
+    const activeLine = currentChannel ? channels.find((channel) => channel.id === currentChannel.id) : null;
+    return activeLine || getBestTestedLine(channels) || channels[0];
+  };
+
+  const getItemChannels = (item: MergedChannelItem) => {
+    return item.type === 'single' ? [item.channel] : item.channels;
+  };
+
+  const isTestingLineGroup = (channels: LiveChannel[]) => {
+    return channels.some((channel) => lineTestResults[getLineTestKey(channel)]?.status === 'testing');
+  };
+
+  const testLineGroup = (event: React.MouseEvent, channels: LiveChannel[]) => {
+    event.stopPropagation();
+    if (isTestingLineGroup(channels)) return;
+    handleTestLines(channels);
+  };
+
+  const testButtonClassName = (disabled: boolean) => (
+    `text-xs px-2 py-1 rounded border flex-shrink-0 ${disabled
+      ? 'border-gray-200 dark:border-gray-700 text-gray-400 dark:text-gray-600 cursor-not-allowed opacity-60'
+      : 'border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:border-green-500 hover:text-green-600 dark:hover:text-green-400'
+    }`
+  );
+
+  const testButtonLabel = (disabled: boolean) => disabled ? '测速中' : '测速';
+
+  const resolveClientUrl = (baseUrl: string, relativePath: string) => {
+    try {
+      if (/^https?:\/\//i.test(relativePath)) return relativePath;
+      if (relativePath.startsWith('//')) {
+        const base = new URL(baseUrl, window.location.href);
+        return `${base.protocol}${relativePath}`;
+      }
+      return new URL(relativePath, new URL(baseUrl, window.location.href)).href;
+    } catch {
+      return relativePath;
+    }
+  };
+
+  const findFirstPlayableLine = (content: string) => {
+    return content
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith('#')) || '';
+  };
+
+  const getClientTestUrl = (rawUrl: string, source?: LiveSource | null) => {
+    const proxyMode = source?.proxyMode || 'full';
+    const lower = rawUrl.toLowerCase();
+    const path = lower.split('?')[0];
+    const isM3u = path.endsWith('.m3u8') || path.endsWith('.m3u') || lower.includes('.m3u8') || lower.includes('.m3u');
+    const isProgressive = path.endsWith('.flv') || path.endsWith('.mp4') || lower.includes('.flv?') || lower.includes('.mp4?');
+
+    if (isProgressive || proxyMode === 'direct') return rawUrl;
+
+    // 和实际播放链路保持一致：full 测代理后的分片，m3u8-only 测直连分片。
+    if (isM3u || !isProgressive) {
+      return `/api/proxy/m3u8?url=${encodeURIComponent(rawUrl)}&moontv-source=${encodeURIComponent(source?.key || '')}${proxyMode === 'm3u8-only' ? '&allowCORS=true' : ''}`;
+    }
+
+    return rawUrl;
+  };
+
+  const fetchTextByClient = async (url: string, signal: AbortSignal) => {
+    const startedAt = performance.now();
+    const response = await fetch(url, { cache: 'no-store', signal });
+    const firstByteMs = performance.now() - startedAt;
+    if (!response.ok) {
+      response.body?.cancel();
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const text = await response.text();
+    return { text, finalUrl: response.url || url, firstByteMs };
+  };
+
+  const sampleByClient = async (url: string, signal: AbortSignal) => {
+    const startedAt = performance.now();
+    const response = await fetch(url, { cache: 'no-store', signal });
+    if (!response.ok) {
+      response.body?.cancel();
+      throw new Error(`HTTP ${response.status}`);
+    }
+    if (!response.body) throw new Error('empty body');
+
+    const reader = response.body.getReader();
+    let firstByteAt = 0;
+    let bytesRead = 0;
+    const sampleBytes = 512 * 1024;
+
+    try {
+      while (bytesRead < sampleBytes) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value?.byteLength) {
+          if (!firstByteAt) firstByteAt = performance.now();
+          bytesRead += value.byteLength;
+        }
+      }
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {
+        // ignore
+      }
+      try {
+        response.body.cancel();
+      } catch {
+        // ignore
+      }
+    }
+
+    const endedAt = performance.now();
+    const firstByteMs = (firstByteAt || endedAt) - startedAt;
+    const transferMs = Math.max(1, endedAt - (firstByteAt || startedAt));
+    const speedKBps = bytesRead > 0 ? (bytesRead / 1024) / (transferMs / 1000) : 0;
+
+    return {
+      firstByteMs: Math.round(firstByteMs),
+      speedKBps: Math.round(speedKBps * 10) / 10,
+      bytesRead,
+    };
+  };
+
+  const testLiveLine = async (channel: LiveChannel): Promise<LiveLineTestResult> => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 10000);
+    const source = currentSourceRef.current || currentSource;
+    const testUrl = getClientTestUrl(channel.url, source);
+    const lowerTestUrl = testUrl.toLowerCase();
+
+    try {
+      const shouldTreatAsM3u8 =
+        lowerTestUrl.includes('.m3u') ||
+        lowerTestUrl.includes('/api/proxy/m3u8');
+
+      if (shouldTreatAsM3u8) {
+        const manifest = await fetchTextByClient(testUrl, controller.signal);
+        let mediaLine = findFirstPlayableLine(manifest.text);
+        if (!mediaLine) throw new Error('empty m3u8');
+
+        let mediaUrl = resolveClientUrl(manifest.finalUrl, mediaLine);
+
+        if (manifest.text.includes('#EXT-X-STREAM-INF') || mediaUrl.toLowerCase().includes('.m3u')) {
+          const child = await fetchTextByClient(mediaUrl, controller.signal);
+          mediaLine = findFirstPlayableLine(child.text);
+          if (!mediaLine) throw new Error('empty child m3u8');
+          mediaUrl = resolveClientUrl(child.finalUrl, mediaLine);
+        }
+
+        const sample = await sampleByClient(mediaUrl, controller.signal);
+        return {
+          status: 'ok',
+          type: 'm3u8',
+          firstByteMs: Math.round(manifest.firstByteMs + sample.firstByteMs),
+          speedKBps: sample.speedKBps,
+          bytesRead: sample.bytesRead,
+          testedAt: Date.now(),
+        };
+      }
+
+      const sample = await sampleByClient(testUrl, controller.signal);
+      return {
+        status: 'ok',
+        type: lowerTestUrl.includes('.flv') ? 'flv' : lowerTestUrl.includes('.mp4') ? 'mp4' : 'unknown',
+        firstByteMs: sample.firstByteMs,
+        speedKBps: sample.speedKBps,
+        bytesRead: sample.bytesRead,
+        testedAt: Date.now(),
+      };
+    } catch (error) {
+      return {
+        status: 'fail',
+        type: 'unknown',
+        firstByteMs: 0,
+        speedKBps: 0,
+        bytesRead: 0,
+        testedAt: Date.now(),
+        error: error instanceof Error ? error.message : '客户端测速失败',
+      };
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  };
+
+  const handleTestLines = async (channels: LiveChannel[]) => {
+    if (!channels.length) return;
+
+    const pendingChannels = channels;
+    const now = Date.now();
+
+    setLineTestResults((prev) => {
+      const next = { ...prev };
+      pendingChannels.forEach((channel) => {
+        next[getLineTestKey(channel)] = {
+          status: 'testing',
+          testedAt: now,
+        };
+      });
+      return next;
+    });
+
+    const maxConcurrency = Math.min(4, pendingChannels.length);
+    let nextIndex = 0;
+
+    const worker = async () => {
+      while (nextIndex < pendingChannels.length) {
+        const channel = pendingChannels[nextIndex++];
+        const key = getLineTestKey(channel);
+        try {
+          const result = await testLiveLine(channel);
+          setLineTestResults((prev) => ({ ...prev, [key]: result }));
+        } catch (error) {
+          setLineTestResults((prev) => ({
+            ...prev,
+            [key]: {
+              status: 'fail',
+              testedAt: Date.now(),
+              error: error instanceof Error ? error.message : '测速失败',
+            },
+          }));
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: maxConcurrency }, () => worker()));
+  };
+
+  const handlePlayLines = (channels: LiveChannel[]) => {
+    const preferred = getPreferredLine(channels);
+    if (preferred) handleChannelChange(preferred);
+  };
+
   // 切换分组
   const handleGroupChange = (group: string) => {
     // 如果正在切换直播源，则禁用分组切换
@@ -1203,7 +1602,7 @@ function LivePageClient() {
             title: currentChannelRef.current.name,
             source_name: currentSourceRef.current.name,
             year: '',
-            cover: `/api/proxy/logo?url=${encodeURIComponent(currentChannelRef.current.logo)}&source=${currentSourceRef.current.key}`,
+            cover: getLogoUrl(currentChannelRef.current.logo, currentSourceRef.current.key),
             total_episodes: 1,
             save_time: Date.now(),
             search_title: '',
@@ -1331,32 +1730,54 @@ function LivePageClient() {
         super(config);
         const load = this.load.bind(this);
         this.load = function (context: any, config: any, callbacks: any) {
-          // 所有的请求都带一个 source 参数
-          try {
-            const url = new URL(context.url);
-            url.searchParams.set('moontv-source', currentSourceRef.current?.key || '');
-            context.url = url.toString();
-          } catch (error) {
-            // ignore
-          }
+          // 判断当前直播源的代理模式
+          const currentLiveSource = currentSourceRef.current;
+          const proxyMode = currentLiveSource?.proxyMode || 'full';
+
           // 拦截manifest和level请求
           if (
             (context as any).type === 'manifest' ||
             (context as any).type === 'level'
           ) {
-            // 判断是否浏览器直连
-            const isLiveDirectConnectStr = localStorage.getItem('liveDirectConnect');
-            const isLiveDirectConnect = isLiveDirectConnectStr === 'true';
-            if (isLiveDirectConnect) {
-              // 浏览器直连，使用 URL 对象处理参数
-              try {
-                const url = new URL(context.url);
-                url.searchParams.set('allowCORS', 'true');
-                context.url = url.toString();
-              } catch (error) {
-                // 如果 URL 解析失败，回退到字符串拼接
-                context.url = context.url + '&allowCORS=true';
+            // manifest 请求处理
+            if ((context as any).type === 'manifest') {
+              if (proxyMode === 'full') {
+                // 全量代理：添加 source 参数
+                try {
+                  const url = new URL(context.url);
+                  url.searchParams.set('moontv-source', currentSourceRef.current?.key || '');
+                  context.url = url.toString();
+                } catch (error) {
+                  // ignore
+                }
+              } else if (proxyMode === 'm3u8-only') {
+                // 仅代理m3u8模式：添加 source 参数和 allowCORS 参数
+                try {
+                  const url = new URL(context.url);
+                  url.searchParams.set('moontv-source', currentSourceRef.current?.key || '');
+                  url.searchParams.set('allowCORS', 'true');
+                  context.url = url.toString();
+                } catch (error) {
+                  context.url = context.url + '&allowCORS=true';
+                }
               }
+              // direct 模式：直接使用原始 URL，不添加任何参数
+            }
+
+            // level 请求（ts 分片）处理
+            if ((context as any).type === 'level') {
+              if (proxyMode === 'full') {
+                // 全量代理：添加 source 参数
+                try {
+                  const url = new URL(context.url);
+                  url.searchParams.set('moontv-source', currentSourceRef.current?.key || '');
+                  context.url = url.toString();
+                } catch (error) {
+                  // ignore
+                }
+              }
+              // m3u8-only 模式：ts 分片 URL 已经被代理服务器重写为原始 URL，不需要添加参数
+              // direct 模式：ts 分片直接使用原始 URL，不添加任何参数
             }
           }
           // 执行原始load方法
@@ -1463,26 +1884,34 @@ function LivePageClient() {
 
       // precheck type
       let type = 'm3u8';
-      try {
-        const precheckUrl = `/api/live/precheck?url=${encodeURIComponent(videoUrl)}&moontv-source=${currentSourceRef.current?.key || ''}`;
-        const precheckResponse = await fetch(precheckUrl);
-        if (!precheckResponse.ok) {
-          console.error('预检查失败:', precheckResponse.statusText);
+      const proxyMode = currentSourceRef.current?.proxyMode || 'full';
+
+      // 直连模式：跳过服务器预检查，直接使用 m3u8
+      if (proxyMode === 'direct') {
+        type = 'm3u8';
+      } else {
+        // 全量代理或仅代理m3u8：通过服务器预检查
+        try {
+          const precheckUrl = `/api/live/precheck?url=${encodeURIComponent(videoUrl)}&moontv-source=${currentSourceRef.current?.key || ''}`;
+          const precheckResponse = await fetch(precheckUrl);
+          if (!precheckResponse.ok) {
+            console.error('预检查失败:', precheckResponse.statusText);
+            setIsVideoLoading(false);
+            return;
+          }
+          const precheckResult = await precheckResponse.json();
+          if (precheckResult?.success && precheckResult?.type) {
+            type = precheckResult.type;
+          } else {
+            console.error('预检查返回无效结果:', precheckResult);
+            setIsVideoLoading(false);
+            return;
+          }
+        } catch (err) {
+          console.error('预检查异常:', err);
           setIsVideoLoading(false);
           return;
         }
-        const precheckResult = await precheckResponse.json();
-        if (precheckResult?.success && precheckResult?.type) {
-          type = precheckResult.type;
-        } else {
-          console.error('预检查返回无效结果:', precheckResult);
-          setIsVideoLoading(false);
-          return;
-        }
-      } catch (err) {
-        console.error('预检查异常:', err);
-        setIsVideoLoading(false);
-        return;
       }
 
       // 如果不是 m3u8、flv 或 mp4 类型，设置不支持的类型并返回
@@ -1496,9 +1925,19 @@ function LivePageClient() {
       setUnsupportedType(null);
 
       const customType = { m3u8: m3u8Loader, flv: flvLoader };
-      const targetUrl = (type === 'flv' || type === 'mp4')
-        ? videoUrl
-        : `/api/proxy/m3u8?url=${encodeURIComponent(videoUrl)}&moontv-source=${currentSourceRef.current?.key || ''}`;
+
+      // 根据代理模式决定 URL
+      let targetUrl = videoUrl;
+      if (type === 'm3u8') {
+        if (proxyMode === 'direct') {
+          // 直连模式：直接使用原始 URL
+          targetUrl = videoUrl;
+        } else {
+          // 全量代理或仅代理m3u8：使用代理 URL
+          targetUrl = `/api/proxy/m3u8?url=${encodeURIComponent(videoUrl)}&moontv-source=${currentSourceRef.current?.key || ''}`;
+        }
+      }
+
       try {
         // 创建新的播放器实例
         Artplayer.USE_RAF = true;
@@ -1515,9 +1954,9 @@ function LivePageClient() {
           autoSize: false,
           autoMini: false,
           screenshot: false,
-          setting: webGPUSupported, // 只有支持WebGPU时才显示设置按钮
+          setting: true,
           loop: false,
-          flip: false,
+          flip: true,
           playbackRate: false,
           aspectRatio: false,
           fullscreen: true,
@@ -1630,6 +2069,8 @@ function LivePageClient() {
             ] : []),
           ],
         });
+
+        artPlayerRef.current.on('flip', syncAnime4KCanvasFlip);
 
         // 监听播放器事件
         artPlayerRef.current.on('ready', () => {
@@ -2165,7 +2606,7 @@ function LivePageClient() {
             </div>
 
             {/* 频道列表 */}
-            <div className={`h-[300px] lg:h-full md:overflow-hidden transition-all duration-300 ease-in-out ${isChannelListCollapsed
+            <div className={`h-[330px] lg:h-full md:overflow-hidden transition-all duration-300 ease-in-out ${isChannelListCollapsed
               ? 'md:col-span-1 lg:hidden lg:opacity-0 lg:scale-95'
               : 'md:col-span-1 lg:opacity-100 lg:scale-100'
               }`}>
@@ -2318,45 +2759,221 @@ function LivePageClient() {
 
                     {/* 频道列表 */}
                     <div ref={channelListRef} className='flex-1 overflow-y-auto space-y-2 pb-4'>
-                      {filteredChannels?.length > 0 ? (
-                        filteredChannels.map(channel => {
-                          const isActive = channel.id === currentChannel?.id;
+                      {mergedChannelItems?.length > 0 ? (
+                        mergedChannelItems.map(item => {
+                          if (item.type === 'single') {
+                            const channel = item.channel;
+                            const isActive = channel.id === currentChannel?.id;
+                            const testLabel = getLineTestLabel(channel);
+                            const testResult = lineTestResults[getLineTestKey(channel)];
+                            const isTesting = isTestingLineGroup(getItemChannels(item));
+                            return (
+                              <button
+                                key={channel.id}
+                                data-channel-id={channel.id}
+                                onClick={() => handlePlayLines(getItemChannels(item))}
+                                disabled={isSwitchingSource}
+                                className={`w-full p-3 rounded-lg text-left transition-all duration-200 ${isSwitchingSource
+                                  ? 'opacity-50 cursor-not-allowed'
+                                  : isActive
+                                    ? 'bg-green-100 dark:bg-green-900/30 border border-green-300 dark:border-green-700'
+                                    : 'hover:bg-gray-100 dark:hover:bg-gray-700'
+                                  }`}
+                              >
+                                <div className='flex items-center gap-3'>
+                                  <div className='w-10 h-10 bg-gray-300 dark:bg-gray-700 rounded-lg flex items-center justify-center flex-shrink-0 overflow-hidden'>
+                                    {channel.logo ? (
+                                      <img
+                                        src={getLogoUrl(channel.logo, currentSource?.key || '')}
+                                        alt={channel.name}
+                                        className='w-full h-full rounded object-contain'
+                                        loading="lazy"
+                                      />
+                                    ) : (
+                                      <Tv className='w-5 h-5 text-gray-500' />
+                                    )}
+                                  </div>
+                                  <div className='flex-1 min-w-0'>
+                                    <div className='text-sm font-medium text-gray-900 dark:text-gray-100 truncate' title={channel.name}>
+                                      {channel.name}
+                                    </div>
+                                    <div className='text-xs text-gray-500 dark:text-gray-400 mt-1 flex items-center gap-2' title={channel.group}>
+                                      <span>{channel.group}</span>
+                                      {testLabel && (
+                                        <>
+                                          <span>·</span>
+                                          <span className={
+                                            testResult?.status === 'ok'
+                                              ? 'text-green-600 dark:text-green-400'
+                                              : testResult?.status === 'fail'
+                                                ? 'text-red-500 dark:text-red-400'
+                                                : 'text-amber-600 dark:text-amber-400'
+                                          }>
+                                            {testLabel}
+                                          </span>
+                                        </>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <span
+                                    role='button'
+                                    aria-disabled={isTesting}
+                                    onClick={(e) => testLineGroup(e, getItemChannels(item))}
+                                    className={testButtonClassName(isTesting)}
+                                  >
+                                    {testButtonLabel(isTesting)}
+                                  </span>
+                                </div>
+                              </button>
+                            );
+                          }
+
+                          const isExpanded = expandedMergedChannels.includes(item.key);
+                          const activeLineIndex = item.channels.findIndex(channel => channel.id === currentChannel?.id);
+                          const hasActiveChild = activeLineIndex !== -1;
+                          const bestLine = getBestTestedLine(item.channels);
+                          const bestLineIndex = bestLine ? item.channels.findIndex(channel => channel.id === bestLine.id) : -1;
+                          const isTestingLines = item.channels.some(channel => lineTestResults[getLineTestKey(channel)]?.status === 'testing');
+                          const bestLineLabel = bestLine ? getLineTestLabel(bestLine) : '';
+
                           return (
-                            <button
-                              key={channel.id}
-                              data-channel-id={channel.id}
-                              onClick={() => handleChannelChange(channel)}
-                              disabled={isSwitchingSource}
-                              className={`w-full p-3 rounded-lg text-left transition-all duration-200 ${isSwitchingSource
-                                ? 'opacity-50 cursor-not-allowed'
-                                : isActive
-                                  ? 'bg-green-100 dark:bg-green-900/30 border border-green-300 dark:border-green-700'
-                                  : 'hover:bg-gray-100 dark:hover:bg-gray-700'
-                                }`}
+                            <div
+                              key={item.key}
+                              className='space-y-2'
                             >
-                              <div className='flex items-center gap-3'>
-                                <div className='w-10 h-10 bg-gray-300 dark:bg-gray-700 rounded-lg flex items-center justify-center flex-shrink-0 overflow-hidden'>
-                                  {channel.logo ? (
-                                    <img
-                                      src={`/api/proxy/logo?url=${encodeURIComponent(channel.logo)}&source=${currentSource?.key || ''}`}
-                                      alt={channel.name}
-                                      className='w-full h-full rounded object-contain'
-                                      loading="lazy"
-                                    />
-                                  ) : (
-                                    <Tv className='w-5 h-5 text-gray-500' />
-                                  )}
-                                </div>
-                                <div className='flex-1 min-w-0'>
-                                  <div className='text-sm font-medium text-gray-900 dark:text-gray-100 truncate' title={channel.name}>
-                                    {channel.name}
+                              <button
+                                type='button'
+                                onClick={() => {
+                                  handlePlayLines(getItemChannels(item));
+                                }}
+                                disabled={isSwitchingSource}
+                                className={`w-full p-3 rounded-lg text-left transition-all duration-200 ${isSwitchingSource
+                                  ? 'opacity-50 cursor-not-allowed'
+                                  : hasActiveChild
+                                    ? 'bg-green-100 dark:bg-green-900/30 border border-green-300 dark:border-green-700'
+                                    : 'hover:bg-gray-100 dark:hover:bg-gray-700'
+                                  }`}
+                              >
+                                <div className='flex items-center gap-3'>
+                                  <div className='w-10 h-10 bg-gray-300 dark:bg-gray-700 rounded-lg flex items-center justify-center flex-shrink-0 overflow-hidden'>
+                                    {item.logo ? (
+                                      <img
+                                        src={getLogoUrl(item.logo, currentSource?.key || '')}
+                                        alt={item.name}
+                                        className='w-full h-full rounded object-contain'
+                                        loading='lazy'
+                                      />
+                                    ) : (
+                                      <Tv className='w-5 h-5 text-gray-500' />
+                                    )}
                                   </div>
-                                  <div className='text-xs text-gray-500 dark:text-gray-400 mt-1' title={channel.group}>
-                                    {channel.group}
+                                  <div className='flex-1 min-w-0'>
+                                    <div className='text-sm font-medium text-gray-900 dark:text-gray-100 truncate' title={item.name}>
+                                      {item.name}
+                                    </div>
+                                    <div className='text-xs text-gray-500 dark:text-gray-400 mt-1 flex items-center gap-2'>
+                                      <span title={item.group}>{item.group}</span>
+                                      <span>·</span>
+                                      <span>{item.channels.length} 条线路</span>
+                                      {hasActiveChild && (
+                                        <>
+                                          <span>·</span>
+                                          <span>{`当前线路${activeLineIndex + 1}`}</span>
+                                        </>
+                                      )}
+                                      {isTestingLines && (
+                                        <>
+                                          <span>·</span>
+                                          <span className='text-amber-600 dark:text-amber-400'>测速中...</span>
+                                        </>
+                                      )}
+                                      {!isTestingLines && bestLine && (
+                                        <>
+                                          <span>·</span>
+                                          <span className='text-green-600 dark:text-green-400'>{`推荐线路${bestLineIndex + 1}${bestLineLabel ? ` ${bestLineLabel}` : ''}`}</span>
+                                        </>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div className='flex flex-col items-end gap-2 flex-shrink-0'>
+                                    <span
+                                      role='button'
+                                      aria-disabled={isTestingLines}
+                                      onClick={(e) => testLineGroup(e, getItemChannels(item))}
+                                      className={testButtonClassName(isTestingLines)}
+                                    >
+                                      {testButtonLabel(isTestingLines)}
+                                    </span>
+                                    <span
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        toggleMergedChannel(item.key);
+                                      }}
+                                      className='text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300'
+                                    >
+                                      {isExpanded ? '收起' : '展开'}
+                                    </span>
                                   </div>
                                 </div>
-                              </div>
-                            </button>
+                              </button>
+
+                              {isExpanded && (
+                                <div className='pl-4 space-y-2'>
+                                  {item.channels.map((channel, index) => {
+                                    const isActive = channel.id === currentChannel?.id;
+                                    const testLabel = getLineTestLabel(channel);
+                                    const testResult = lineTestResults[getLineTestKey(channel)];
+                                    const isBestLine = bestLine?.id === channel.id;
+                                    return (
+                                      <button
+                                        key={channel.id}
+                                        type='button'
+                                        data-channel-id={channel.id}
+                                        onClick={() => handleChannelChange(channel)}
+                                        disabled={isSwitchingSource}
+                                        className={`w-full p-3 rounded-lg text-left text-sm transition-all duration-200 ${
+                                          isSwitchingSource
+                                            ? 'opacity-50 cursor-not-allowed'
+                                            : isActive
+                                              ? 'bg-green-100 dark:bg-green-900/30 border border-green-300 dark:border-green-700'
+                                              : 'hover:bg-gray-100 dark:hover:bg-gray-700'
+                                        }`}
+                                      >
+                                        <div className='flex items-center justify-between gap-3'>
+                                          <span className='font-medium text-gray-900 dark:text-gray-100 flex items-center gap-2'>
+                                            <GitBranch className='w-4 h-4 text-gray-500 dark:text-gray-400' />
+                                            {`线路${index + 1}`}
+                                          </span>
+                                          <div className='flex items-center gap-2 text-xs'>
+                                            {testLabel && (
+                                              <span className={
+                                                testResult?.status === 'ok'
+                                                  ? 'text-green-600 dark:text-green-400'
+                                                  : testResult?.status === 'fail'
+                                                    ? 'text-red-500 dark:text-red-400'
+                                                    : 'text-amber-600 dark:text-amber-400'
+                                              }>
+                                                {testLabel}
+                                              </span>
+                                            )}
+                                            {isBestLine && (
+                                              <span className='rounded bg-green-100 px-2 py-0.5 text-green-700 dark:bg-green-900/40 dark:text-green-300'>
+                                                推荐
+                                              </span>
+                                            )}
+                                            {isActive && (
+                                              <span className='text-green-600 dark:text-green-400'>
+                                                当前播放
+                                              </span>
+                                            )}
+                                          </div>
+                                        </div>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
                           );
                         })
                       ) : (
@@ -2462,7 +3079,7 @@ function LivePageClient() {
                   <div className='w-20 h-20 bg-gray-300 dark:bg-gray-700 rounded-lg flex items-center justify-center flex-shrink-0 overflow-hidden'>
                     {currentChannel.logo ? (
                       <img
-                        src={`/api/proxy/logo?url=${encodeURIComponent(currentChannel.logo)}&source=${currentSource?.key || ''}`}
+                        src={getLogoUrl(currentChannel.logo, currentSource?.key || '')}
                         alt={currentChannel.name}
                         className='w-full h-full rounded object-contain'
                         loading="lazy"

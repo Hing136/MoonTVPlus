@@ -14,6 +14,7 @@ import {
 } from '@/lib/douban.client';
 import { DoubanItem, DoubanResult } from '@/lib/types';
 
+import BangumiScheduleTimeline from '@/components/BangumiScheduleTimeline';
 import DoubanCardSkeleton from '@/components/DoubanCardSkeleton';
 import DoubanCustomSelector from '@/components/DoubanCustomSelector';
 import DoubanSelector from '@/components/DoubanSelector';
@@ -30,6 +31,7 @@ function DoubanPageClient() {
   const [selectorsReady, setSelectorsReady] = useState(false);
   const observerRef = useRef<IntersectionObserver | null>(null);
   const loadingRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // 用于存储最新参数值的 refs
@@ -89,6 +91,9 @@ function DoubanPageClient() {
     }
     return '';
   });
+
+  // 每日放送视图模式：grid(卡片) / schedule(时刻表)
+  const [viewMode, setViewMode] = useState<'grid' | 'schedule'>('grid');
 
   // 获取自定义分类数据
   useEffect(() => {
@@ -598,6 +603,34 @@ function DoubanPageClient() {
     };
   }, [hasMore, isLoadingMore, loading]);
 
+  // 首屏如果未被撑满，仅在第一页时额外请求一次下一页
+  useEffect(() => {
+    if (
+      loading ||
+      !selectorsReady ||
+      isLoadingMore ||
+      !hasMore ||
+      doubanData.length === 0 ||
+      currentPage !== 0
+    ) {
+      return;
+    }
+
+    const rafId = window.requestAnimationFrame(() => {
+      const contentEl = contentRef.current;
+      if (!contentEl) return;
+
+      const rect = contentEl.getBoundingClientRect();
+      const preloadThreshold = window.innerHeight + 120;
+
+      if (rect.bottom < preloadThreshold) {
+        setCurrentPage(1);
+      }
+    });
+
+    return () => window.cancelAnimationFrame(rafId);
+  }, [loading, selectorsReady, isLoadingMore, hasMore, doubanData.length, currentPage]);
+
   // 处理选择器变化
   const handlePrimaryChange = useCallback(
     (value: string) => {
@@ -739,6 +772,12 @@ function DoubanPageClient() {
     return activePath;
   };
 
+  // 是否为时刻表视图（每日放送 + 已切换）
+  const isScheduleView =
+    type === 'anime' &&
+    primarySelection === '每日放送' &&
+    viewMode === 'schedule';
+
   return (
     <PageLayout activePath={getActivePath()}>
       <div className='px-4 sm:px-10 py-4 sm:py-8 overflow-visible'>
@@ -765,6 +804,8 @@ function DoubanPageClient() {
                 onSecondaryChange={handleSecondaryChange}
                 onMultiLevelChange={handleMultiLevelChange}
                 onWeekdayChange={handleWeekdayChange}
+                viewMode={viewMode}
+                onViewModeChange={setViewMode}
               />
             </div>
           ) : (
@@ -781,33 +822,41 @@ function DoubanPageClient() {
         </div>
 
         {/* 内容展示区域 */}
-        <div className='max-w-[95%] mx-auto mt-8 overflow-visible'>
-          {/* 内容网格 */}
-          <div className='justify-start grid grid-cols-3 gap-x-2 gap-y-12 px-0 sm:px-2 sm:grid-cols-[repeat(auto-fill,minmax(160px,1fr))] sm:gap-x-8 sm:gap-y-20'>
-            {loading || !selectorsReady
-              ? // 显示骨架屏
-                skeletonData.map((index) => <DoubanCardSkeleton key={index} />)
-              : // 显示实际数据
-                doubanData.map((item, index) => (
-                  <div key={`${item.title}-${index}`} className='w-full'>
-                    <VideoCard
-                      from='douban'
-                      title={item.title}
-                      poster={item.poster}
-                      douban_id={Number(item.id)}
-                      rate={item.rate}
-                      year={item.year}
-                      type={type === 'movie' ? 'movie' : ''} // 电影类型严格控制，tv 不控
-                      isBangumi={
-                        type === 'anime' && primarySelection === '每日放送'
-                      }
-                    />
-                  </div>
-                ))}
-          </div>
+        <div ref={contentRef} className='max-w-[95%] mx-auto mt-8 overflow-visible'>
+          {/* 时刻表视图（每日放送） */}
+          {isScheduleView ? (
+            <BangumiScheduleTimeline weekday={selectedWeekday} />
+          ) : (
+            /* 内容网格 */
+            <div className='justify-start grid grid-cols-3 gap-x-2 gap-y-12 px-0 sm:px-2 sm:grid-cols-[repeat(auto-fill,minmax(160px,1fr))] sm:gap-x-8 sm:gap-y-20'>
+              {loading || !selectorsReady
+                ? // 显示骨架屏
+                  skeletonData.map((index) => (
+                    <DoubanCardSkeleton key={index} />
+                  ))
+                : // 显示实际数据
+                  doubanData.map((item, index) => (
+                    <div key={`${item.title}-${index}`} className='w-full'>
+                      <VideoCard
+                        from='douban'
+                        title={item.title}
+                        poster={item.poster}
+                        douban_id={Number(item.id)}
+                        rate={item.rate}
+                        year={item.year}
+                        type={type === 'movie' ? 'movie' : ''} // 电影类型严格控制，tv 不控
+                        isBangumi={
+                          type === 'anime' && primarySelection === '每日放送'
+                        }
+                        isAnime={type === 'anime'}
+                      />
+                    </div>
+                  ))}
+            </div>
+          )}
 
           {/* 加载更多指示器 */}
-          {hasMore && !loading && (
+          {!isScheduleView && hasMore && !loading && (
             <div
               ref={(el) => {
                 if (el && el.offsetParent !== null) {
@@ -828,12 +877,12 @@ function DoubanPageClient() {
           )}
 
           {/* 没有更多数据提示 */}
-          {!hasMore && doubanData.length > 0 && (
+          {!isScheduleView && !hasMore && doubanData.length > 0 && (
             <div className='text-center text-gray-500 py-8'>已加载全部内容</div>
           )}
 
           {/* 空状态 */}
-          {!loading && doubanData.length === 0 && (
+          {!isScheduleView && !loading && doubanData.length === 0 && (
             <div className='text-center text-gray-500 py-8'>暂无相关内容</div>
           )}
         </div>

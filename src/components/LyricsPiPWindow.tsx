@@ -10,12 +10,13 @@ interface Song {
   artist: string;
   album?: string;
   pic?: string;
-  platform: 'netease' | 'qq' | 'kuwo';
+  platform: 'wy' | 'tx' | 'kw' | 'kg' | 'mg';
 }
 
 interface LyricLine {
   time: number;
   text: string;
+  translation?: string;
 }
 
 interface LyricsPiPWindowProps {
@@ -28,6 +29,7 @@ interface LyricsPiPWindowProps {
   minimized: boolean;
   onOpacityChange: (opacity: number) => void;
   onMinimizedChange: (minimized: boolean) => void;
+  onLyricSeek?: (line: LyricLine, index: number) => void;
   onClose: () => void;
 }
 
@@ -39,6 +41,7 @@ interface PiPLyricsContentProps {
   minimized: boolean;
   onOpacityChange: (opacity: number) => void;
   onMinimizedChange: (minimized: boolean) => void;
+  onLyricSeek?: (line: LyricLine, index: number) => void;
   onClose: () => void;
 }
 
@@ -51,6 +54,7 @@ const PiPLyricsContent = ({
   minimized,
   onOpacityChange,
   onMinimizedChange,
+  onLyricSeek,
   onClose,
 }: PiPLyricsContentProps) => {
   const lyricsContainerRef = useRef<HTMLDivElement>(null);
@@ -187,7 +191,11 @@ const PiPLyricsContent = ({
           }}
         >
           {lyrics.length > 0 && currentLyricIndex >= 0
-            ? lyrics[currentLyricIndex]?.text || '♪'
+            ? (
+              lyrics[currentLyricIndex]?.translation
+                ? `${lyrics[currentLyricIndex]?.text || '♪'}\n${lyrics[currentLyricIndex]?.translation}`
+                : lyrics[currentLyricIndex]?.text || '♪'
+            )
             : currentSong
             ? '暂无歌词'
             : '请播放歌曲'}
@@ -208,9 +216,13 @@ const PiPLyricsContent = ({
         >
           {lyrics.length > 0 ? (
             lyrics.map((line, index) => (
-              <div
+              <button
                 key={index}
+                type="button"
+                onClick={() => onLyricSeek?.(line, index)}
                 style={{
+                  display: 'block',
+                  width: '100%',
                   padding: '8px 0',
                   textAlign: 'center',
                   fontSize: index === currentLyricIndex ? '16px' : '14px',
@@ -218,10 +230,27 @@ const PiPLyricsContent = ({
                   color: index === currentLyricIndex ? '#22c55e' : 'white',
                   transition: 'all 0.3s ease',
                   fontWeight: index === currentLyricIndex ? 'bold' : 'normal',
+                  background: 'transparent',
+                  border: 'none',
+                  outline: 'none',
+                  appearance: 'none',
+                  cursor: onLyricSeek ? 'pointer' : 'default',
                 }}
               >
-                {line.text}
-              </div>
+                <div>{line.text}</div>
+                {line.translation && (
+                  <div
+                    style={{
+                      marginTop: '4px',
+                      fontSize: index === currentLyricIndex ? '13px' : '12px',
+                      opacity: index === currentLyricIndex ? 0.85 : 0.55,
+                      fontWeight: 'normal',
+                    }}
+                  >
+                    {line.translation}
+                  </div>
+                )}
+              </button>
             ))
           ) : (
             <div
@@ -277,6 +306,7 @@ export default function LyricsPiPWindow({
   minimized,
   onOpacityChange,
   onMinimizedChange,
+  onLyricSeek,
   onClose,
 }: LyricsPiPWindowProps) {
   const pipWindowRef = useRef<Window | null>(null);
@@ -310,6 +340,7 @@ export default function LyricsPiPWindow({
         onMinimizedChange={(newMinimized) => {
           window.postMessage({ type: 'PIP_MINIMIZED_CHANGE', minimized: newMinimized }, '*');
         }}
+        onLyricSeek={onLyricSeek}
         onClose={() => {
           window.postMessage({ type: 'PIP_CLOSE' }, '*');
         }}
@@ -333,13 +364,14 @@ export default function LyricsPiPWindow({
           onMinimizedChange={(newMinimized) => {
             window.postMessage({ type: 'PIP_MINIMIZED_CHANGE', minimized: newMinimized }, '*');
           }}
+          onLyricSeek={onLyricSeek}
           onClose={() => {
             window.postMessage({ type: 'PIP_CLOSE' }, '*');
           }}
         />
       );
     }
-  }, [currentSong, lyrics, currentLyricIndex, opacity, minimized]);
+  }, [currentSong, lyrics, currentLyricIndex, opacity, minimized, onLyricSeek]);
 
   // 打开 PiP 窗口
   useEffect(() => {

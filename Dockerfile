@@ -45,21 +45,33 @@ ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0
 ENV PORT=3000
 ENV DOCKER_ENV=true
+ENV SQLITE_DB_PATH=/app/.data/moontv.db
+ENV OFFLINE_DOWNLOAD_DIR=/data
 
 # 从构建器中复制 standalone 输出
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 # 从构建器中复制 scripts 目录
 COPY --from=builder --chown=nextjs:nodejs /app/scripts ./scripts
+# 从构建器中复制 migrations 目录
+COPY --from=builder --chown=nextjs:nodejs /app/migrations ./migrations
 # 从构建器中复制 start.js
 COPY --from=builder --chown=nextjs:nodejs /app/start.js ./start.js
 # 从构建器中复制自定义 server.js（包含 Socket.IO 支持）
 COPY --from=builder --chown=nextjs:nodejs /app/server.js ./server.js
+# 自定义 server.js 在运行时会 require('./src/lib/tv-remote-hub.js')。
+# Next standalone 只会追踪 Next 应用入口，不会自动包含自定义服务器额外 require 的源文件，
+# 因此需要显式复制该运行时模块，避免生产镜像启动时报 Cannot find module。
+COPY --from=builder --chown=nextjs:nodejs /app/src/lib/tv-remote-hub.js ./src/lib/tv-remote-hub.js
 # 从构建器中复制 public 和 .next/static 目录
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-# 从构建器中复制生产依赖（包含 Socket.IO）
+# 从构建器中复制生产依赖（包含 Socket.IO / better-sqlite3）
 COPY --from=builder --chown=nextjs:nodejs /tmp/prod-deps/node_modules ./node_modules
+
+# 准备 SQLite 数据目录和默认离线下载目录
+RUN mkdir -p /app/.data "$OFFLINE_DOWNLOAD_DIR" \
+  && chown -R nextjs:nodejs /app/.data "$OFFLINE_DOWNLOAD_DIR"
 
 # 切换到非特权用户
 USER nextjs
@@ -67,4 +79,4 @@ USER nextjs
 EXPOSE 3000
 
 # 使用自定义启动脚本，先预加载配置再启动服务器
-CMD ["node", "start.js"] 
+CMD ["node", "start.js"]

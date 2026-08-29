@@ -1,6 +1,6 @@
 import { Radio, X } from 'lucide-react';
 import Image from 'next/image';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 interface ActionItem {
@@ -21,10 +21,12 @@ interface MobileActionSheetProps {
   sources?: string[]; // 播放源信息
   isAggregate?: boolean; // 是否为聚合内容
   sourceName?: string; // 播放源名称
+  directLinkUrl?: string; // 直链播放完整链接
   currentEpisode?: number; // 当前集数
   totalEpisodes?: number; // 总集数
   origin?: 'vod' | 'live';
   onPosterClick?: () => void; // 海报点击回调
+  description?: string; // 标题下方描述文案
 }
 
 const MobileActionSheet: React.FC<MobileActionSheetProps> = ({
@@ -36,14 +38,26 @@ const MobileActionSheet: React.FC<MobileActionSheetProps> = ({
   sources,
   isAggregate,
   sourceName,
+  directLinkUrl,
   currentEpisode,
   totalEpisodes,
   origin = 'vod',
   onPosterClick,
+  description = '选择操作',
 }) => {
   const [isVisible, setIsVisible] = useState(false);
   const [isAnimating, setIsAnimating] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const [isTitleOverflowing, setIsTitleOverflowing] = useState(false);
+  const backdropPressStarted = useRef(false);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const actionsListRef = useRef<HTMLDivElement>(null);
+
+  // 操作区可滚动：有可用播放源最多显示 4 项，否则最多 6 项
+  const hasPlaySources = Boolean(isAggregate && sources && sources.length > 0);
+  // 单项 py-4(2rem) + 内容 h-6(1.5rem) = 3.5rem
+  const actionsMaxVisible = hasPlaySources ? 4 : 6;
+  const actionsMaxHeight = `calc(3.5rem * ${actionsMaxVisible})`;
 
   // 确保组件在客户端挂载后才渲染 Portal
   useEffect(() => {
@@ -56,6 +70,7 @@ const MobileActionSheet: React.FC<MobileActionSheetProps> = ({
     let timer: NodeJS.Timeout;
 
     if (isOpen) {
+      backdropPressStarted.current = false;
       setIsVisible(true);
       // 使用双重 requestAnimationFrame 确保DOM完全渲染
       animationId = requestAnimationFrame(() => {
@@ -64,6 +79,7 @@ const MobileActionSheet: React.FC<MobileActionSheetProps> = ({
         });
       });
     } else {
+      backdropPressStarted.current = false;
       setIsAnimating(false);
       // 等待动画完成后隐藏组件
       timer = setTimeout(() => {
@@ -131,6 +147,57 @@ const MobileActionSheet: React.FC<MobileActionSheetProps> = ({
     }
   }, [isVisible]);
 
+  useEffect(() => {
+    const element = titleRef.current;
+    if (!element || !isVisible) {
+      setIsTitleOverflowing(false);
+      return;
+    }
+
+    const checkOverflow = () => {
+      setIsTitleOverflowing(element.scrollWidth > element.clientWidth + 1);
+    };
+
+    checkOverflow();
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', checkOverflow);
+      return () => window.removeEventListener('resize', checkOverflow);
+    }
+
+    const observer = new ResizeObserver(checkOverflow);
+    observer.observe(element);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [isVisible, title]);
+
+  // 操作列表：用非 passive 的 wheel 监听，保证鼠标滚轮可滚动且不穿透到背景
+  useEffect(() => {
+    if (!isVisible) return;
+    const el = actionsListRef.current;
+    if (!el) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      e.stopPropagation();
+      const { scrollTop, scrollHeight, clientHeight } = el;
+      if (scrollHeight <= clientHeight) {
+        e.preventDefault();
+        return;
+      }
+      const maxScrollTop = scrollHeight - clientHeight;
+      const next = Math.min(maxScrollTop, Math.max(0, scrollTop + e.deltaY));
+      if (next !== scrollTop) {
+        el.scrollTop = next;
+      }
+      e.preventDefault();
+    };
+
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, [isVisible, actionsMaxVisible]);
+
   // ESC键关闭
   useEffect(() => {
     const handleEsc = (e: KeyboardEvent) => {
@@ -169,6 +236,23 @@ const MobileActionSheet: React.FC<MobileActionSheetProps> = ({
     }
   };
 
+  const armBackdropClose = () => {
+    backdropPressStarted.current = true;
+  };
+
+  const handleBackdropClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    // 菜单打开前那次长按的松手会产生一个“悬空 click”，
+    // 这次 click 并不是从遮罩开始按下的，所以不能拿来关闭菜单。
+    if (!backdropPressStarted.current) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
+    backdropPressStarted.current = false;
+    onClose();
+  };
+
   const content = (
     <div
       className="fixed inset-0 z-[9999] flex items-end justify-center"
@@ -185,7 +269,9 @@ const MobileActionSheet: React.FC<MobileActionSheetProps> = ({
       <div
         className={`absolute inset-0 bg-black/50 transition-opacity duration-200 ease-out ${isAnimating ? 'opacity-100' : 'opacity-0'
           }`}
-        onClick={onClose}
+        onPointerDown={armBackdropClose}
+        onTouchStart={armBackdropClose}
+        onClick={handleBackdropClick}
         onTouchMove={(e) => {
           // 只阻止滚动，允许其他触摸事件（包括点击）
           e.preventDefault();
@@ -240,10 +326,21 @@ const MobileActionSheet: React.FC<MobileActionSheetProps> = ({
               </div>
             )}
             <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 mb-1">
-                <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 truncate">
-                  {title}
-                </h3>
+              <div className="flex items-center gap-2 mb-1 min-w-0">
+                <div className="relative min-w-0 flex-1 group/title">
+                  <h3
+                    ref={titleRef}
+                    className="text-lg font-semibold text-gray-900 dark:text-gray-100 truncate"
+                  >
+                    {title}
+                  </h3>
+                  {isTitleOverflowing && (
+                    <div className="absolute bottom-full left-1/2 z-10 mb-2 w-max max-w-[min(20rem,calc(100vw-2rem))] -translate-x-1/2 rounded-lg bg-gray-800 px-3 py-2 text-center text-sm text-white shadow-xl opacity-0 invisible transition-all duration-200 ease-out whitespace-normal break-words pointer-events-none group-hover/title:opacity-100 group-hover/title:visible dark:bg-gray-900">
+                      {title}
+                      <div className="absolute top-full left-1/2 h-0 w-0 -translate-x-1/2 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-800 dark:border-t-gray-900"></div>
+                    </div>
+                  )}
+                </div>
                 {sourceName && (
                   <span className="flex-shrink-0 text-xs px-2 py-1 border border-gray-300 dark:border-gray-600 rounded text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800">
                     {origin === 'live' && (
@@ -253,8 +350,13 @@ const MobileActionSheet: React.FC<MobileActionSheetProps> = ({
                   </span>
                 )}
               </div>
+              {directLinkUrl && (
+                <p className="mb-2 text-xs text-gray-500 dark:text-gray-400 break-all">
+                  {directLinkUrl}
+                </p>
+              )}
               <p className="text-sm text-gray-500 dark:text-gray-400">
-                选择操作
+                {description}
               </p>
             </div>
           </div>
@@ -267,62 +369,75 @@ const MobileActionSheet: React.FC<MobileActionSheetProps> = ({
           </button>
         </div>
 
-        {/* 操作列表 */}
+        {/* 操作列表：有源最多 4 项 / 无源最多 6 项，超出可滑动（支持触控与鼠标滚轮） */}
         <div className="px-4 py-2">
-          {actions.map((action, index) => (
-            <div key={action.id}>
-              <button
-                onClick={() => {
-                  action.onClick();
-                  onClose();
-                }}
-                disabled={action.disabled}
-                className={`
-                  w-full flex items-center gap-4 py-4 px-2 transition-all duration-150 ease-out
-                  ${action.disabled
-                    ? 'opacity-50 cursor-not-allowed'
-                    : `${getActionHoverColor(action.color)} active:scale-[0.98]`
-                  }
-                `}
-                style={{ willChange: 'transform, background-color' }}
-              >
-                {/* 图标 - 使用线条风格 */}
-                <div className="w-6 h-6 flex items-center justify-center flex-shrink-0">
-                  <span className={`transition-colors duration-150 ${action.disabled
-                    ? 'text-gray-400 dark:text-gray-600'
-                    : getActionColor(action.color)
-                    }`}>
-                    {action.icon}
-                  </span>
-                </div>
+          <div
+            ref={actionsListRef}
+            className="overflow-y-auto overscroll-contain"
+            style={{
+              maxHeight: actionsMaxHeight,
+              WebkitOverflowScrolling: 'touch',
+            }}
+            onTouchMove={(e) => {
+              // 允许操作列表内部滑动，阻止冒泡到外层遮罩
+              e.stopPropagation();
+            }}
+          >
+            {actions.map((action, index) => (
+              <div key={action.id}>
+                <button
+                  onClick={() => {
+                    action.onClick();
+                    onClose();
+                  }}
+                  disabled={action.disabled}
+                  className={`
+                    w-full flex items-center gap-4 py-4 px-2 transition-all duration-150 ease-out
+                    ${action.disabled
+                      ? 'opacity-50 cursor-not-allowed'
+                      : `${getActionHoverColor(action.color)} active:scale-[0.98]`
+                    }
+                  `}
+                  style={{ willChange: 'transform, background-color' }}
+                >
+                  {/* 图标 - 使用线条风格 */}
+                  <div className="w-6 h-6 flex items-center justify-center flex-shrink-0">
+                    <span className={`transition-colors duration-150 ${action.disabled
+                      ? 'text-gray-400 dark:text-gray-600'
+                      : getActionColor(action.color)
+                      }`}>
+                      {action.icon}
+                    </span>
+                  </div>
 
-                {/* 文字 */}
-                <span className={`
-                  text-left font-medium text-base flex-1
-                  ${action.disabled
-                    ? 'text-gray-400 dark:text-gray-600'
-                    : 'text-gray-900 dark:text-gray-100'
-                  }
-                `}>
-                  {action.label}
-                </span>
-
-                {/* 播放进度 - 只在播放按钮且有播放记录时显示 */}
-                {action.id === 'play' && currentEpisode && totalEpisodes && (
-                  <span className="text-sm text-gray-500 dark:text-gray-400 font-medium">
-                    {currentEpisode}/{totalEpisodes}
+                  {/* 文字 */}
+                  <span className={`
+                    text-left font-medium text-base flex-1
+                    ${action.disabled
+                      ? 'text-gray-400 dark:text-gray-600'
+                      : 'text-gray-900 dark:text-gray-100'
+                    }
+                  `}>
+                    {action.label}
                   </span>
+
+                  {/* 播放进度 - 只在播放按钮且有播放记录时显示 */}
+                  {action.id === 'play' && currentEpisode && totalEpisodes && (
+                    <span className="text-sm text-gray-500 dark:text-gray-400 font-medium">
+                      {currentEpisode}/{totalEpisodes}
+                    </span>
+                  )}
+
+
+                </button>
+
+                {/* 分割线 - 最后一项不显示 */}
+                {index < actions.length - 1 && (
+                  <div className="border-b border-gray-100 dark:border-gray-800 ml-10"></div>
                 )}
-
-
-              </button>
-
-              {/* 分割线 - 最后一项不显示 */}
-              {index < actions.length - 1 && (
-                <div className="border-b border-gray-100 dark:border-gray-800 ml-10"></div>
-              )}
-            </div>
-          ))}
+              </div>
+            ))}
+          </div>
         </div>
 
         {/* 播放源信息展示区域 */}

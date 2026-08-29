@@ -2,7 +2,7 @@
 
 'use client';
 
-import { AlertCircle, CheckCircle, Eye, EyeOff, User, Lock } from 'lucide-react';
+import { AlertCircle, CheckCircle, Eye, EyeOff, Send, User, Lock } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useState } from 'react';
 
@@ -73,6 +73,7 @@ function RegisterPageClient() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
@@ -82,6 +83,8 @@ function RegisterPageClient() {
   const [siteConfig, setSiteConfig] = useState<any>(null);
   const [turnstileWidgetId, setTurnstileWidgetId] = useState<string | null>(null);
   const [backgroundImage, setBackgroundImage] = useState<string>('');
+  const [registerSuccess, setRegisterSuccess] = useState(false);
+  const [telegramBind, setTelegramBind] = useState<{ code: string; deepLink?: string } | null>(null);
 
   const { siteName } = useSite();
 
@@ -108,6 +111,7 @@ function RegisterPageClient() {
       // 设置站点配置
       const config = {
         EnableRegistration: runtimeConfig?.ENABLE_REGISTRATION || false,
+        RequireRegistrationInviteCode: runtimeConfig?.REQUIRE_REGISTRATION_INVITE_CODE || false,
         RegistrationRequireTurnstile: runtimeConfig?.REGISTRATION_REQUIRE_TURNSTILE || false,
         TurnstileSiteKey: runtimeConfig?.TURNSTILE_SITE_KEY || '',
       };
@@ -167,6 +171,11 @@ function RegisterPageClient() {
       return;
     }
 
+    if (siteConfig?.RequireRegistrationInviteCode && !inviteCode.trim()) {
+      setError('请输入邀请码');
+      return;
+    }
+
     if (password !== confirmPassword) {
       setError('两次输入的密码不一致');
       return;
@@ -191,11 +200,22 @@ function RegisterPageClient() {
         body: JSON.stringify({
           username,
           password,
+          inviteCode: siteConfig?.RequireRegistrationInviteCode ? inviteCode.trim() : undefined,
           turnstileToken: siteConfig?.RegistrationRequireTurnstile ? turnstileToken : undefined,
         }),
       });
 
       if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (data.telegramBind?.code) {
+          setTelegramBind({
+            code: data.telegramBind.code,
+            deepLink: data.telegramBind.deepLink || '',
+          });
+          setRegisterSuccess(true);
+          return;
+        }
+
         // 注册成功，跳转到登录页
         const redirect = searchParams.get('redirect') || '/login';
         router.replace(redirect);
@@ -257,6 +277,48 @@ function RegisterPageClient() {
         <p className='text-center text-sm text-gray-600 dark:text-gray-400 mb-8'>
           创建新账号
         </p>
+        {registerSuccess ? (
+          <div className='space-y-5'>
+            <div className='rounded-2xl border border-green-200 bg-green-50 p-4 text-green-800 dark:border-green-800 dark:bg-green-900/30 dark:text-green-200'>
+              <div className='mb-2 flex items-center gap-2 font-semibold'>
+                <CheckCircle className='h-5 w-5' />
+                注册成功
+              </div>
+              <p className='text-sm'>账号已创建。你可以现在绑定 Telegram，用于接收通知和后续快捷登录。</p>
+            </div>
+
+            {telegramBind && (
+              <div className='rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sky-900 dark:border-sky-800 dark:bg-sky-900/30 dark:text-sky-100'>
+                <div className='mb-3 flex items-center gap-2 font-semibold'>
+                  <Send className='h-5 w-5' />
+                  Telegram 绑定
+                </div>
+                <p className='text-sm'>在 Bot 中发送：</p>
+                <div className='my-3 rounded-lg bg-white/80 px-3 py-2 font-mono text-lg font-bold tracking-widest dark:bg-zinc-900/70'>
+                  /bind {telegramBind.code}
+                </div>
+                {telegramBind.deepLink && (
+                  <button
+                    type='button'
+                    onClick={() => window.open(telegramBind.deepLink, '_blank', 'noopener,noreferrer')}
+                    className='mb-3 inline-flex w-full items-center justify-center rounded-lg bg-sky-600 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-sky-700'
+                  >
+                    打开 Telegram
+                  </button>
+                )}
+                <p className='text-xs opacity-80'>绑定码 10 分钟内有效，也可稍后登录后在通知设置中重新生成。</p>
+              </div>
+            )}
+
+            <button
+              type='button'
+              onClick={() => router.replace(searchParams.get('redirect') || '/login')}
+              className='inline-flex w-full justify-center rounded-lg bg-green-600 py-3 text-base font-semibold text-white shadow-lg transition-all duration-200 hover:bg-green-700'
+            >
+              前往登录
+            </button>
+          </div>
+        ) : (
         <form onSubmit={handleSubmit} className='space-y-6'>
           <div>
             <label htmlFor='username' className='sr-only'>
@@ -340,6 +402,27 @@ function RegisterPageClient() {
             </div>
           </div>
 
+          {siteConfig?.RequireRegistrationInviteCode && (
+            <div>
+              <label htmlFor='inviteCode' className='sr-only'>
+                邀请码
+              </label>
+              <div className='relative'>
+                <div className='absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none'>
+                  <User className='h-5 w-5 text-gray-400 dark:text-gray-500' />
+                </div>
+                <input
+                  id='inviteCode'
+                  type='text'
+                  className='block w-full rounded-lg border-0 py-3 pl-10 pr-4 text-gray-900 dark:text-gray-100 shadow-sm ring-1 ring-white/60 dark:ring-white/20 placeholder:text-gray-500 dark:placeholder:text-gray-400 focus:ring-2 focus:ring-green-500 focus:outline-none sm:text-base bg-white/60 dark:bg-zinc-800/60'
+                  placeholder='输入邀请码'
+                  value={inviteCode}
+                  onChange={(e) => setInviteCode(e.target.value)}
+                />
+              </div>
+            </div>
+          )}
+
           {/* Cloudflare Turnstile */}
           {siteConfig?.RegistrationRequireTurnstile && siteConfig?.TurnstileSiteKey && (
             <div id='turnstile-container' className='flex justify-center'></div>
@@ -354,6 +437,7 @@ function RegisterPageClient() {
             type='submit'
             disabled={
               !username || !password || !confirmPassword || loading ||
+              (siteConfig?.RequireRegistrationInviteCode && !inviteCode.trim()) ||
               (siteConfig?.RegistrationRequireTurnstile && !turnstileToken)
             }
             className='inline-flex w-full justify-center rounded-lg bg-green-600 py-3 text-base font-semibold text-white shadow-lg transition-all duration-200 hover:from-green-600 hover:to-blue-600 disabled:cursor-not-allowed disabled:opacity-50'
@@ -372,6 +456,7 @@ function RegisterPageClient() {
             </button>
           </div>
         </form>
+        )}
       </div>
 
       {/* 版本信息显示 */}
