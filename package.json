@@ -44,6 +44,7 @@
     "@types/qrcode": "^1.5.6",
     "@upstash/redis": "^1.25.0",
     "@vercel/postgres": "^0.10.0",
+    "@vercel/speed-insights": "^2.0.0",
     "@vidstack/react": "^1.12.13",
     "@xmldom/xmldom": "^0.9.10",
     "anime4k-webgpu": "^1.0.0",
